@@ -9,34 +9,59 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/zaibon/badger/badger"
-	"github.com/zaibon/resp"
+	"github.com/dgraph-io/badger"
+	"github.com/tidwall/resp"
 )
 
-type BadgerKV struct {
-	kv *badger.KV
+type BadgerDB struct {
+	db *badger.DB
 }
 
-func NewKV(metaDir, valueDir string) *BadgerKV {
+func NewKV(metaDir, valueDir string) *BadgerDB {
 	opts := badger.DefaultOptions
 	opts.Dir = metaDir
 	opts.ValueDir = valueDir
-	kv := badger.NewKV(&opts)
+    opts.SyncWrites = false
 
-	return &BadgerKV{
-		kv: kv,
+	db, err := badger.Open(opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return &BadgerDB{
+		db: db,
 	}
 }
-func (b *BadgerKV) Close() {
-	b.kv.Close()
+
+func (b *BadgerDB) Close() {
+	b.db.Close()
 }
 
-func (b *BadgerKV) Get(conn *resp.Conn, args []resp.Value) bool {
+func (b *BadgerDB) Get(conn *resp.Conn, args []resp.Value) bool {
 	if len(args) != 2 {
 		conn.WriteError(errors.New("ERR wrong number of arguments for 'get' command"))
 	} else {
 		key := args[1].Bytes()
-		val, _ := b.kv.Get(key)
+		var val []byte
+
+		err := b.db.View(func(txn *badger.Txn) error {
+			item, err := txn.Get(key)
+			if err != nil {
+				return err
+			}
+
+			val, err = item.Value()
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			fmt.Println(err)
+		}
+
 		if val == nil {
 			conn.WriteNull()
 		} else {
@@ -46,19 +71,28 @@ func (b *BadgerKV) Get(conn *resp.Conn, args []resp.Value) bool {
 	return true
 }
 
-func (b *BadgerKV) Set(conn *resp.Conn, args []resp.Value) bool {
+func (b *BadgerDB) Set(conn *resp.Conn, args []resp.Value) bool {
 	if len(args) != 3 {
 		conn.WriteError(errors.New("ERR wrong number of arguments for 'set' command"))
 	} else {
 		key := args[1].Bytes()
 		val := args[2].Bytes()
-		b.kv.Set(key, val)
-		conn.WriteSimpleString("OK")
+
+		err := b.db.Update(func(txn *badger.Txn) error {
+			err := txn.Set(key, val)
+			return err
+		})
+
+		if err != nil {
+			log.Print(err)
+		}
+
+		conn.WriteBytes(key)
 	}
 	return true
 }
 
-func (b *BadgerKV) Ping(conn *resp.Conn, args []resp.Value) bool {
+func (b *BadgerDB) Ping(conn *resp.Conn, args []resp.Value) bool {
 	if len(args) == 1 {
 		conn.WriteSimpleString("PONG")
 	} else if len(args) == 2 {
